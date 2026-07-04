@@ -16,7 +16,7 @@ import logging
 import json
 import pathlib
 import re
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 from watchfiles import DefaultFilter, Change, awatch
 
 from ytdl import DownloadQueueNotifier, DownloadQueue, Download
@@ -112,6 +112,13 @@ class Config:
         if not self.URL_PREFIX.endswith('/'):
             self.URL_PREFIX += '/'
 
+        # A blank PUBLIC_HOST_AUDIO_URL (e.g. set empty in a compose file) bypasses the
+        # default via os.environ.get, which would leave audio links root-relative and 404.
+        # Fall back to the 'audio_download/' route that serves AUDIO_DOWNLOAD_DIR. When
+        # PUBLIC_HOST_URL is also blank we leave it blank to preserve serving from web root.
+        if not self.PUBLIC_HOST_AUDIO_URL and self.PUBLIC_HOST_URL:
+            self.PUBLIC_HOST_AUDIO_URL = self._DEFAULTS['PUBLIC_HOST_AUDIO_URL']
+
         for attr in ('PUBLIC_HOST_URL', 'PUBLIC_HOST_AUDIO_URL'):
             val = getattr(self, attr)
             if val and not val.endswith('/'):
@@ -130,6 +137,10 @@ class Config:
             )
             sys.exit(1)
 
+        self._validate_int('MAX_CONCURRENT_DOWNLOADS', minimum=1)
+        self._validate_int('PORT', minimum=1, maximum=65535)
+        self._validate_int('CLEAR_COMPLETED_AFTER', minimum=0)
+
         self._runtime_overrides = {}
 
         success,_ = self.load_ytdl_options()
@@ -137,6 +148,20 @@ class Config:
             sys.exit(1)
         success,_ = self.load_ytdl_option_presets()
         if not success:
+            sys.exit(1)
+
+    def _validate_int(self, key, *, minimum=None, maximum=None):
+        raw = getattr(self, key)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            log.error('Environment variable "%s" must be an integer, got "%s"', key, raw)
+            sys.exit(1)
+        if minimum is not None and value < minimum:
+            log.error('Environment variable "%s" must be >= %d, got "%s"', key, minimum, raw)
+            sys.exit(1)
+        if maximum is not None and value > maximum:
+            log.error('Environment variable "%s" must be <= %d, got "%s"', key, maximum, raw)
             sys.exit(1)
 
     def set_runtime_override(self, key, value):
@@ -241,7 +266,13 @@ logging.getLogger().setLevel(parseLogLevel(str(config.LOGLEVEL)) or logging.INFO
 
 class ObjectSerializer(json.JSONEncoder):
     def default(self, obj):
-        # First try to use __dict__ for custom objects
+        # Prefer an explicit client-facing view when the object provides one
+        # (e.g. DownloadInfo / SubscriptionInfo) so server-only or bulky fields
+        # are never broadcast to browser clients.
+        to_public = getattr(obj, 'to_public_dict', None)
+        if callable(to_public):
+            return to_public()
+        # Fall back to __dict__ for other custom objects
         if hasattr(obj, '__dict__'):
             return obj.__dict__
         # Convert iterables (generators, dict_items, etc.) to lists
@@ -255,7 +286,30 @@ class ObjectSerializer(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 serializer = ObjectSerializer()
-app = web.Application()
+
+_STATE_DIR_REAL = os.path.realpath(config.STATE_DIR)
+
+
+def _is_within_state_dir(real_target: str) -> bool:
+    return real_target == _STATE_DIR_REAL or real_target.startswith(_STATE_DIR_REAL + os.sep)
+
+
+@web.middleware
+async def state_dir_guard(request, handler):
+    for prefix, base in (
+        (config.URL_PREFIX + 'download/', config.DOWNLOAD_DIR),
+        (config.URL_PREFIX + 'audio_download/', config.AUDIO_DOWNLOAD_DIR),
+    ):
+        if request.path.startswith(prefix):
+            rel = unquote(request.path[len(prefix):])
+            target = os.path.realpath(os.path.join(base, rel))
+            if _is_within_state_dir(target):
+                raise web.HTTPNotFound()
+            break
+    return await handler(request)
+
+
+app = web.Application(middlewares=[state_dir_guard])
 _cors_origins = [o.strip() for o in config.CORS_ALLOWED_ORIGINS.split(',') if o.strip()] if config.CORS_ALLOWED_ORIGINS else []
 sio = socketio.AsyncServer(cors_allowed_origins=_cors_origins if _cors_origins else [])
 sio.attach(app, socketio_path=config.URL_PREFIX + 'socket.io')
@@ -827,10 +881,7 @@ async def cancel_add(request):
 @routes.post(config.URL_PREFIX + 'subscribe')
 async def subscribe(request):
     post = await _read_json_request(request)
-    try:
-        o = parse_download_options(post)
-    except web.HTTPBadRequest:
-        raise
+    o = parse_download_options(post)
     cic = post.get('check_interval_minutes')
     if cic is None:
         cic = config.SUBSCRIPTION_DEFAULT_CHECK_INTERVAL
@@ -964,6 +1015,12 @@ async def upload_cookies(request):
     tmp_cookie_path = f"{COOKIES_PATH}.tmp"
     with open(tmp_cookie_path, 'wb') as f:
         f.write(content)
+    # Cookies are sensitive auth material; restrict to owner read/write only
+    # (the container's default umask would otherwise leave them group/world readable).
+    try:
+        os.chmod(tmp_cookie_path, 0o600)
+    except OSError as exc:
+        log.warning(f'Could not restrict permissions on cookies file: {exc}')
     os.replace(tmp_cookie_path, COOKIES_PATH)
     config.set_runtime_override('cookiefile', COOKIES_PATH)
     log.info(f'Cookies file uploaded ({size} bytes)')

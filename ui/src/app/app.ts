@@ -13,6 +13,8 @@ import { CookieService } from 'ngx-cookie-service';
 import { AddDownloadPayload, DownloadsService } from './services/downloads.service';
 import { MeTubeSocket } from './services/metube-socket.service';
 import { SubscriptionsService } from './services/subscriptions.service';
+import { ToastService } from './services/toast.service';
+import { BatchUrlsService, BatchUrlFilter } from './services/batch-urls.service';
 import { SubscriptionRow } from './interfaces/subscription';
 import { Themes } from './theme';
 import {
@@ -32,7 +34,7 @@ import {
   State,
 } from './interfaces';
 import { EtaPipe, SpeedPipe, FileSizePipe } from './pipes';
-import { SelectAllCheckboxComponent, ItemCheckboxComponent } from './components/';
+import { SelectAllCheckboxComponent, ItemCheckboxComponent, ToastContainerComponent } from './components/';
 
 @Component({
   selector: 'app-root',
@@ -50,6 +52,7 @@ import { SelectAllCheckboxComponent, ItemCheckboxComponent } from './components/
         FileSizePipe,
         SelectAllCheckboxComponent,
         ItemCheckboxComponent,
+        ToastContainerComponent,
   ],
   templateUrl: './app.html',
   styleUrl: './app.sass',
@@ -57,6 +60,8 @@ import { SelectAllCheckboxComponent, ItemCheckboxComponent } from './components/
 export class App implements AfterViewInit, OnInit, OnDestroy {
   downloads = inject(DownloadsService);
   subscriptionsSvc = inject(SubscriptionsService);
+  private toasts = inject(ToastService);
+  private batchUrls = inject(BatchUrlsService);
   private socket = inject(MeTubeSocket);
   private cookieService = inject(CookieService);
   private http = inject(HttpClient);
@@ -132,6 +137,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   lastCopiedErrorId: string | null = null;
   private previousDownloadType = 'video';
   private addRequestSub?: Subscription;
+  private liveCountdownTimer?: ReturnType<typeof setInterval>;
   private selectionsByType: Record<string, {
     codec: string;
     format: string;
@@ -285,6 +291,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     // Subscribe to download updates
     this.downloads.queueChanged.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
       this.updateMetrics();
+      this.syncLiveCountdownTimer();
       this.cdr.markForCheck();
     });
     this.downloads.doneChanged.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
@@ -295,6 +302,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     // Subscribe to real-time updates
     this.downloads.updated.pipe(takeUntilDestroyed(this.destroyRef)).subscribe(() => {
       this.updateMetrics();
+      this.syncLiveCountdownTimer();
       this.cdr.markForCheck();
     });
 
@@ -337,6 +345,9 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
 
   ngOnDestroy() {
     this.addRequestSub?.unsubscribe();
+    if (this.liveCountdownTimer) {
+      clearInterval(this.liveCountdownTimer);
+    }
     this.colorSchemeMediaQuery.removeEventListener('change', this.onColorSchemeChanged);
   }
 
@@ -409,7 +420,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
           const date = new Date(data['update_time'] * 1000);
           this.ytDlpOptionsUpdateTime=date.toLocaleString();
         }else{
-          alert("Error reload yt-dlp options: "+data['msg']);
+          this.toasts.error("Error reloading yt-dlp options: " + data['msg']);
         }
         this.cdr.markForCheck();
       }
@@ -484,11 +495,11 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     try {
       const parsed = JSON.parse(trimmed);
       if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-        alert('Custom yt-dlp options must be a JSON object');
+        this.toasts.error('Custom yt-dlp options must be a JSON object');
         return false;
       }
     } catch {
-      alert('Custom yt-dlp options must be valid JSON');
+      this.toasts.error('Custom yt-dlp options must be valid JSON');
       return false;
     }
     return true;
@@ -519,7 +530,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.subscriptionsSvc.refreshList().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((refreshRes) => {
       const error = this.getStatusError(refreshRes);
       if (error) {
-        alert(error || 'Refresh subscriptions failed');
+        this.toasts.error(error || 'Refresh subscriptions failed');
         return;
       }
       this.cdr.markForCheck();
@@ -563,7 +574,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     }
     const payload = this.buildAddPayload();
     if (!payload.url?.trim()) {
-      alert('Please enter a URL');
+      this.toasts.error('Please enter a URL');
       return;
     }
     const tr = (this.titleRegex || '').trim();
@@ -571,12 +582,12 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       try {
         void RegExp(tr);
       } catch {
-        alert('Invalid subscription title filter (regex)');
+        this.toasts.error('Invalid subscription title filter (regex)');
         return;
       }
     }
     if (payload.splitByChapters && !payload.chapterTemplate.includes('%(section_number)')) {
-      alert('Chapter template must include %(section_number)');
+      this.toasts.error('Chapter template must include %(section_number)');
       return;
     }
     if (!this.validateYtdlOptionsOverrides(payload.ytdlOptionsOverrides)) {
@@ -605,7 +616,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         next: (res) => {
           const r = res as { status?: string; msg?: string };
           if (r.status === 'error') {
-            alert(r.msg || 'Subscribe failed');
+            this.toasts.error(r.msg || 'Subscribe failed');
           } else {
             this.addUrl = '';
             this.titleRegex = '';
@@ -633,14 +644,14 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       try {
         void RegExp(raw);
       } catch {
-        alert('Invalid subscription title filter (regex)');
+        this.toasts.error('Invalid subscription title filter (regex)');
         return;
       }
     }
     this.subscriptionsSvc.update(id, { title_regex: raw }).subscribe((res) => {
       const error = this.getStatusError(res);
       if (error) {
-        alert(error || 'Update subscription failed');
+        this.toasts.error(error || 'Update subscription failed');
         return;
       }
       this.cancelEditTitleRegex();
@@ -651,7 +662,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.subscriptionsSvc.delete([id]).subscribe((res) => {
       const error = this.getStatusError(res);
       if (error) {
-        alert(error || 'Delete subscription failed');
+        this.toasts.error(error || 'Delete subscription failed');
         return;
       }
       this.selectedSubscriptionIds.delete(id);
@@ -667,7 +678,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.subscriptionsSvc.delete(ids).subscribe((res) => {
       const error = this.getStatusError(res);
       if (error) {
-        alert(error || 'Delete subscriptions failed');
+        this.toasts.error(error || 'Delete subscriptions failed');
         return;
       }
       this.selectedSubscriptionIds.clear();
@@ -693,7 +704,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       .subscribe((res) => {
         const error = this.getStatusError(res);
         if (error) {
-          alert(error || 'Subscription check failed');
+          this.toasts.error(error || 'Subscription check failed');
           return;
         }
         this.refreshSubscriptionsWithAlert();
@@ -740,7 +751,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       .subscribe((res) => {
         const error = this.getStatusError(res);
         if (error) {
-          alert(error || 'Subscription check failed');
+          this.toasts.error(error || 'Subscription check failed');
           return;
         }
         this.refreshSubscriptionsWithAlert();
@@ -763,7 +774,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.subscriptionsSvc.update(row.id, { enabled: !row.enabled }).subscribe((res) => {
       const error = this.getStatusError(res);
       if (error) {
-        alert(error || 'Update subscription failed');
+        this.toasts.error(error || 'Update subscription failed');
       }
     });
   }
@@ -1060,20 +1071,19 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
 
     // Validate chapter template if chapter splitting is enabled
     if (payload.splitByChapters && !payload.chapterTemplate.includes('%(section_number)')) {
-      alert('Chapter template must include %(section_number)');
+      this.toasts.error('Chapter template must include %(section_number)');
       return;
     }
     if (!this.validateYtdlOptionsOverrides(payload.ytdlOptionsOverrides)) {
       return;
     }
 
-    console.debug('Downloading:', payload);
     this.addInProgress = true;
     this.cancelRequested = false;
     this.addRequestSub?.unsubscribe();
     this.addRequestSub = this.downloads.add(payload).subscribe((status: Status) => {
       if (status.status === 'error' && !this.cancelRequested) {
-        alert(`Error adding URL: ${status.msg}`);
+        this.toasts.error(`Error adding URL: ${status.msg}`);
       } else if (status.status !== 'error') {
         this.addUrl = '';
       }
@@ -1104,6 +1114,26 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
 
   downloadItemByKey(id: string) {
     this.downloads.startById([id]).subscribe();
+  }
+
+  liveCountdownSeconds(download: Download): number | null {
+    const ts = download.live_release_timestamp;
+    if (ts == null || download.status !== 'scheduled') {
+      return null;
+    }
+    return Math.max(0, ts - Date.now() / 1000);
+  }
+
+  private syncLiveCountdownTimer() {
+    const hasScheduled = Array.from(this.downloads.queue.values()).some(
+      (download) => download.status === 'scheduled',
+    );
+    if (hasScheduled && !this.liveCountdownTimer) {
+      this.liveCountdownTimer = setInterval(() => this.cdr.markForCheck(), 1000);
+    } else if (!hasScheduled && this.liveCountdownTimer) {
+      clearInterval(this.liveCountdownTimer);
+      this.liveCountdownTimer = undefined;
+    }
   }
 
   retryDownload(key: string, download: Download) {
@@ -1159,19 +1189,39 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     });
   }
 
-  downloadSelectedFiles() {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    this.downloads.done.forEach((dl, _) => {
+  // Chromium-based browsers silently drop programmatic downloads beyond ~10 when
+  // triggered in a tight loop. Trigger in batches with a short pause in between so
+  // large selections download cleanly. See issue #1008.
+  private static readonly DOWNLOAD_BATCH_SIZE = 10;
+  private static readonly DOWNLOAD_BATCH_DELAY_MS = 1000;
+
+  async downloadSelectedFiles() {
+    const selected: Download[] = [];
+    this.downloads.done.forEach((dl) => {
       if (dl.status === 'finished' && dl.checked) {
-        const link = document.createElement('a');
-        link.href = this.buildDownloadLink(dl);
-        link.setAttribute('download', dl.filename);
-        link.setAttribute('target', '_self');
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+        selected.push(dl);
       }
     });
+
+    for (let i = 0; i < selected.length; i++) {
+      const dl = selected[i];
+      const link = document.createElement('a');
+      link.href = this.buildDownloadLink(dl);
+      link.setAttribute('download', dl.filename);
+      link.setAttribute('target', '_self');
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      if (
+        (i + 1) % App.DOWNLOAD_BATCH_SIZE === 0 &&
+        i + 1 < selected.length
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, App.DOWNLOAD_BATCH_DELAY_MS),
+        );
+      }
+    }
   }
 
   buildDownloadLink(download: Download) {
@@ -1215,10 +1265,12 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     // file into memory only to have navigator.canShare reject it.
     if (download.size && download.size > App.SHARE_SIZE_WARN_BYTES) {
       const sizeMb = Math.round(download.size / 1024 / 1024);
-      const proceed = window.confirm(
+      const proceed = await this.toasts.confirm(
         `This file is ${sizeMb} MB. iOS' share sheet often refuses files ` +
         `larger than ~100 MB and the share will silently fail. ` +
-        `Try anyway? (Use the download button instead if it fails.)`
+        `Try anyway? (Use the download button instead if it fails.)`,
+        'Try anyway',
+        'Cancel',
       );
       if (!proceed) return;
     }
@@ -1239,7 +1291,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         // download button right next to this one instead of staring at
         // a button that quietly did nothing.
         console.warn('navigator.canShare rejected payload for', download.filename);
-        window.alert(
+        this.toasts.error(
           `Your device's share sheet doesn't accept this file ` +
           `(most likely because it's too large). ` +
           `Please use the download button instead.`
@@ -1252,7 +1304,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       // AbortError = user dismissed the share sheet → silent no-op.
       if (e.name === 'AbortError') return;
       console.error('Share failed:', err);
-      window.alert(
+      this.toasts.error(
         `Share failed: ${e.message || 'unknown error'}. ` +
         `Please use the download button instead.`
       );
@@ -1344,7 +1396,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
       .map(url => url.trim())
       .filter(url => url.length > 0);
     if (urls.length === 0) {
-      alert('No valid URLs found.');
+      this.toasts.error('No valid URLs found.');
       return;
     }
     this.importInProgress = true;
@@ -1409,62 +1461,13 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
   }
 
   // Export URLs based on filter: 'pending', 'completed', 'failed', or 'all'
-  exportBatchUrls(filter: 'pending' | 'completed' | 'failed' | 'all'): void {
-    let urls: string[];
-    if (filter === 'pending') {
-      urls = Array.from(this.downloads.queue.values()).map(dl => dl.url);
-    } else if (filter === 'completed') {
-      // Only finished downloads in the "done" Map
-      urls = Array.from(this.downloads.done.values()).filter(dl => dl.status === 'finished').map(dl => dl.url);
-    } else if (filter === 'failed') {
-      // Only error downloads from the "done" Map
-      urls = Array.from(this.downloads.done.values()).filter(dl => dl.status === 'error').map(dl => dl.url);
-    } else {
-      // All: pending + both finished and error in done
-      urls = [
-        ...Array.from(this.downloads.queue.values()).map(dl => dl.url),
-        ...Array.from(this.downloads.done.values()).map(dl => dl.url)
-      ];
-    }
-    if (!urls.length) {
-      alert('No URLs found for the selected filter.');
-      return;
-    }
-    const content = urls.join('\n');
-    const blob = new Blob([content], { type: 'text/plain' });
-    const downloadUrl = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    a.download = 'metube_urls.txt';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(downloadUrl);
+  exportBatchUrls(filter: BatchUrlFilter): void {
+    this.batchUrls.export(filter);
   }
 
   // Copy URLs to clipboard based on filter: 'pending', 'completed', 'failed', or 'all'
-  copyBatchUrls(filter: 'pending' | 'completed' | 'failed' | 'all'): void {
-    let urls: string[];
-    if (filter === 'pending') {
-      urls = Array.from(this.downloads.queue.values()).map(dl => dl.url);
-    } else if (filter === 'completed') {
-      urls = Array.from(this.downloads.done.values()).filter(dl => dl.status === 'finished').map(dl => dl.url);
-    } else if (filter === 'failed') {
-      urls = Array.from(this.downloads.done.values()).filter(dl => dl.status === 'error').map(dl => dl.url);
-    } else {
-      urls = [
-        ...Array.from(this.downloads.queue.values()).map(dl => dl.url),
-        ...Array.from(this.downloads.done.values()).map(dl => dl.url)
-      ];
-    }
-    if (!urls.length) {
-      alert('No URLs found for the selected filter.');
-      return;
-    }
-    const content = urls.join('\n');
-    navigator.clipboard.writeText(content)
-      .then(() => alert('URLs copied to clipboard.'))
-      .catch(() => alert('Failed to copy URLs.'));
+  copyBatchUrls(filter: BatchUrlFilter): void {
+    this.batchUrls.copy(filter);
   }
 
   fetchVersionInfo(): void {
@@ -1524,7 +1527,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     };
     const fail = (err?: unknown) => {
       console.error('Clipboard write failed:', err);
-      alert('Failed to copy to clipboard. Your browser may require HTTPS for clipboard access.');
+      this.toasts.error('Failed to copy to clipboard. Your browser may require HTTPS for clipboard access.');
     };
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(text).then(done).catch(fail);
@@ -1560,7 +1563,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
           this.hasCookies = true;
         } else {
           this.refreshCookieStatus();
-          alert(`Error uploading cookies: ${this.formatErrorMessage(response?.msg)}`);
+          this.toasts.error(`Error uploading cookies: ${this.formatErrorMessage(response?.msg)}`);
         }
         this.cookieUploadInProgress = false;
         input.value = '';
@@ -1569,7 +1572,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         this.refreshCookieStatus();
         this.cookieUploadInProgress = false;
         input.value = '';
-        alert('Error uploading cookies.');
+        this.toasts.error('Error uploading cookies.');
       }
     });
   }
@@ -1603,11 +1606,11 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
           return;
         }
         this.refreshCookieStatus();
-        alert(`Error deleting cookies: ${this.formatErrorMessage(response?.msg)}`);
+        this.toasts.error(`Error deleting cookies: ${this.formatErrorMessage(response?.msg)}`);
       },
       error: () => {
         this.refreshCookieStatus();
-        alert('Error deleting cookies.');
+        this.toasts.error('Error deleting cookies.');
       }
     });
   }
@@ -1631,7 +1634,7 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
         speed += download.speed || 0;
       } else if (download.status === 'preparing') {
         active++;
-      } else if (download.status === 'pending') {
+      } else if (download.status === 'pending' || download.status === 'scheduled') {
         queued++;
       }
     });

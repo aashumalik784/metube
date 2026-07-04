@@ -51,6 +51,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(c.PUBLIC_HOST_URL, "")
         self.assertEqual(c.PUBLIC_HOST_AUDIO_URL, "")
 
+    def test_blank_audio_host_falls_back_to_audio_download_route(self):
+        # Regression: a present-but-blank PUBLIC_HOST_AUDIO_URL must not stay empty
+        # (which produced root-relative, 404ing audio links). It falls back to the
+        # 'audio_download/' route that serves AUDIO_DOWNLOAD_DIR.
+        with patch.dict(
+            os.environ,
+            _base_env(PUBLIC_HOST_URL="https://ytdl.example.com", PUBLIC_HOST_AUDIO_URL=""),
+            clear=False,
+        ):
+            c = Config()
+        self.assertEqual(c.PUBLIC_HOST_URL, "https://ytdl.example.com/")
+        self.assertEqual(c.PUBLIC_HOST_AUDIO_URL, "audio_download/")
+
     def test_public_host_url_already_slashed_unchanged(self):
         with patch.dict(
             os.environ,
@@ -122,6 +135,29 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(os.environ, _base_env(YTDL_NIGHTLY_UPDATE_TIME=bad), clear=False):
                 with self.assertRaises(SystemExit):
                     Config()
+
+    def test_invalid_max_concurrent_downloads_exits(self):
+        for bad in ("0", "-1", "abc"):
+            with patch.dict(os.environ, _base_env(MAX_CONCURRENT_DOWNLOADS=bad), clear=False):
+                with self.assertRaises(SystemExit):
+                    Config()
+
+    def test_invalid_port_exits(self):
+        for bad in ("0", "70000", "notaport"):
+            with patch.dict(os.environ, _base_env(PORT=bad), clear=False):
+                with self.assertRaises(SystemExit):
+                    Config()
+
+    def test_invalid_clear_completed_after_exits(self):
+        for bad in ("-5", "soon"):
+            with patch.dict(os.environ, _base_env(CLEAR_COMPLETED_AFTER=bad), clear=False):
+                with self.assertRaises(SystemExit):
+                    Config()
+
+    def test_clear_completed_after_zero_allowed(self):
+        with patch.dict(os.environ, _base_env(CLEAR_COMPLETED_AFTER="0"), clear=False):
+            c = Config()
+        self.assertEqual(c.CLEAR_COMPLETED_AFTER, "0")
 
     def test_runtime_override_roundtrip(self):
         with patch.dict(os.environ, _base_env(), clear=False):

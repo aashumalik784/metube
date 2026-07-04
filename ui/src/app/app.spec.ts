@@ -4,6 +4,7 @@ import { Subject, of } from 'rxjs';
 import { App } from './app';
 import { DownloadsService } from './services/downloads.service';
 import { SubscriptionsService } from './services/subscriptions.service';
+import { ToastService } from './services/toast.service';
 import { CookieService } from 'ngx-cookie-service';
 
 class DownloadsServiceStub {
@@ -182,6 +183,37 @@ describe('App', () => {
     expect(payload.ytdlOptionsOverrides).toBe('');
   });
 
+  it('shows waiting badge for scheduled live stream', () => {
+    downloads.queue.set('https://example.com/live', {
+      id: 'live1',
+      title: 'Upcoming Stream',
+      url: 'https://example.com/live',
+      download_type: 'video',
+      quality: 'best',
+      format: 'any',
+      folder: '',
+      custom_name_prefix: '',
+      playlist_item_limit: 0,
+      status: 'scheduled',
+      live_status: 'is_upcoming',
+      live_release_timestamp: Date.now() / 1000 + 3600,
+      msg: '',
+      percent: 0,
+      speed: 0,
+      eta: 0,
+      filename: '',
+      checked: false,
+    });
+    downloads.queueChanged.next();
+
+    const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
+
+    const root = fixture.nativeElement as HTMLElement;
+    expect(root.textContent).toContain('Waiting for stream');
+    expect(root.textContent).toContain('starts in');
+  });
+
   it('includes titleRegex in subscribe payload', () => {
     const fixture = TestBed.createComponent(App);
     const app = fixture.componentInstance;
@@ -232,7 +264,8 @@ describe('App', () => {
   });
 
   it('blocks subscribe with invalid title regex', () => {
-    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    const toasts = TestBed.inject(ToastService);
+    const errorSpy = vi.spyOn(toasts, 'error').mockImplementation(() => undefined);
     const fixture = TestBed.createComponent(App);
     const app = fixture.componentInstance;
     const subs = TestBed.inject(SubscriptionsService) as unknown as SubscriptionsServiceStub;
@@ -240,7 +273,7 @@ describe('App', () => {
     app.titleRegex = '[';
     app.addSubscription();
     expect(subs.subscribeCalls.length).toBe(0);
-    expect(alertSpy).toHaveBeenCalledWith('Invalid subscription title filter (regex)');
-    alertSpy.mockRestore();
+    expect(errorSpy).toHaveBeenCalledWith('Invalid subscription title filter (regex)');
+    errorSpy.mockRestore();
   });
 });
