@@ -18,8 +18,6 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock docker-entrypoint.sh ./
 
-# Use sed to strip carriage-return characters from the entrypoint script (in case building on Windows)
-# Install dependencies
 RUN sed -i 's/\r$//g' docker-entrypoint.sh && \
     chmod +x docker-entrypoint.sh && \
     apt-get update && \
@@ -72,6 +70,8 @@ ENV STATE_DIR=/data/downloads/.metube
 ENV TEMP_DIR=/data/downloads
 ENV PORT=8081
 EXPOSE 8081
+
+ENV YTDL_OPTIONS={"extractor_args":{"youtubepot-bgutilhttp":{"base_url":"http://127.0.0.1:4416"}}}
 
 ARG VERSION=dev
 ENV METUBE_VERSION=$VERSION
