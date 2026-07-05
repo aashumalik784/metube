@@ -2,8 +2,14 @@ FROM node:lts-alpine AS builder
 
 WORKDIR /metube
 COPY ui ./
-RUN corepack enable && corepack prepare pnpm --activate
-RUN CI=true pnpm install && pnpm run build
+
+RUN npm config set strict-ssl false && \
+    npm install -g pnpm@9.15.0 --force && \
+    rm -f pnpm-workspace.yaml && \
+    pnpm config set store-dir /root/.pnpm-store
+
+RUN CI=true pnpm install --frozen-lockfile --ignore-workspace && \
+    pnpm run build
 
 
 FROM python:3.13-slim
@@ -12,8 +18,6 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock docker-entrypoint.sh ./
 
-# Use sed to strip carriage-return characters from the entrypoint script (in case building on Windows)
-# Install dependencies
 RUN sed -i 's/\r$//g' docker-entrypoint.sh && \
     chmod +x docker-entrypoint.sh && \
     apt-get update && \
@@ -34,9 +38,10 @@ RUN sed -i 's/\r$//g' docker-entrypoint.sh && \
     curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y && \
     apt-get purge -y --auto-remove build-essential && \
     rm -rf /var/lib/apt/lists/* && \
-    mkdir /.cache && chmod 777 /.cache
+    mkdir -p /.cache /data/downloads /data/downloads/.metube && \
+    chmod -R 777 /.cache /data/downloads
 
-ARG TARGETARCH
+ARG TARGETARCH=amd64
 
 RUN BGUTIL_TAG="$(curl -Ls -o /dev/null -w '%{url_effective}' https://github.com/jim60105/bgutil-ytdlp-pot-provider-rs/releases/latest | sed 's#.*/tag/##')" && \
     case "$TARGETARCH" in \
@@ -60,14 +65,12 @@ ENV PUID=1000
 ENV PGID=1000
 ENV UMASK=022
 
-ENV DOWNLOAD_DIR=/downloads
-ENV STATE_DIR=/downloads/.metube
-ENV TEMP_DIR=/downloads
+ENV DOWNLOAD_DIR=/data/downloads
+ENV STATE_DIR=/data/downloads/.metube
+ENV TEMP_DIR=/data/downloads
 ENV PORT=8081
 EXPOSE 8081
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD curl -fsS "http://localhost:${PORT}/" || exit 1
 
-# Add build-time argument for version
 ARG VERSION=dev
 ENV METUBE_VERSION=$VERSION
 
